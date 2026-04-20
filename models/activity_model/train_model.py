@@ -180,6 +180,11 @@ def main():
     np.random.shuffle(indices)
     x_all, y_all = x_all[indices], y_all[indices]
 
+    # Normalize to [-1, 1] for better int8 quantization
+    input_scale = np.max(np.abs(x_all))
+    x_all = x_all / input_scale
+    print(f"  input scale factor: {input_scale:.4f}")
+
     split = int(0.8 * len(y_all))
     x_train, y_train = x_all[:split], y_all[:split]
     x_test, y_test = x_all[split:], y_all[split:]
@@ -188,15 +193,16 @@ def main():
 
     # ── Train float model ────────────────────────────────────────────
     model = build_model()
+    lr = tf.keras.optimizers.schedules.CosineDecay(0.001, decay_steps=15000)
     model.compile(
-        optimizer="adam",
+        optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
         loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
         metrics=["accuracy"],
     )
     model.summary()
 
     print("\nTraining ...")
-    model.fit(x_train, y_train, epochs=30, batch_size=64,
+    model.fit(x_train, y_train, epochs=50, batch_size=64,
               validation_split=0.1, verbose=2)
 
     loss, acc = model.evaluate(x_test, y_test, verbose=0)
@@ -291,6 +297,7 @@ def main():
         f.write(f"sample_rate_hz: {SAMPLE_RATE_HZ}\n")
         f.write(f"imu_position: hand_wrist\n")
         f.write(f"accel_scale: plusminus_16g\n")
+        f.write(f"input_scale_factor: {input_scale}\n")
         f.write(f"input_quant_scale: {q_scale_in}\n")
         f.write(f"input_quant_zp: {q_zp_in}\n")
         f.write(f"output_quant_scale: {q_scale_out}\n")
