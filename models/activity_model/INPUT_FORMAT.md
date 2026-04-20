@@ -61,23 +61,29 @@ for (int s = 0; s < WINDOW_SIZE; s++) {
 
 ## Normalization (Critical)
 
-The training data was normalized by dividing by the **input scale factor**
-before training. This factor is saved in `output/activity_model_meta.txt`:
-
-```
-input_scale_factor: 157.75999450683594
-```
+The training data was normalized using **per-axis z-score normalization**
+(mean subtraction + std division, computed per axis across all training data).
+The per-axis means and stds are saved in `output/activity_model_meta.txt`.
 
 **The same normalization must be applied on the device before quantization.**
 Skipping this step will cause the model to see a completely different data
 distribution and accuracy will drop dramatically.
 
-```c
-#define INPUT_SCALE_FACTOR  157.76f
+```
+axis_means: 0.123456,0.234567,0.345678
+axis_stds:  5.678901,6.789012,7.890123
+```
 
-/* After collecting window[] with raw m/s² values: */
-for (int i = 0; i < NUM_FEATURES; i++) {
-    window[i] = window[i] / INPUT_SCALE_FACTOR;
+```c
+#define AXIS_MEANS  { 0.123456f, 0.234567f, 0.345678f }
+#define AXIS_STDS   { 5.678901f, 6.789012f, 7.890123f }
+
+/* After collecting window[] with raw m/s² values (interleaved XYZ): */
+for (int s = 0; s < WINDOW_SIZE; s++) {
+    for (int a = 0; a < NUM_AXES; a++) {
+        window[s * NUM_AXES + a] = (window[s * NUM_AXES + a] - axis_means[a])
+                                   / axis_stds[a];
+    }
 }
 ```
 
@@ -115,10 +121,11 @@ static void quantize_window(const float *src, int8_t *dst, size_t len,
 ```c
 #include "nrf_axon_model_activity_model_.h"
 
-#define INPUT_SCALE_FACTOR  157.76f
 #define WINDOW_SIZE         50
 #define NUM_AXES            3
 #define NUM_FEATURES        (WINDOW_SIZE * NUM_AXES)
+#define AXIS_MEANS          { 0.123456f, 0.234567f, 0.345678f }  /* from meta file */
+#define AXIS_STDS           { 5.678901f, 6.789012f, 7.890123f }  /* from meta file */
 
 static float  window_float[NUM_FEATURES];
 static int8_t input_q8[NUM_FEATURES];
@@ -133,9 +140,14 @@ void activity_inference_loop(void)
         /* 1. Collect 50 samples (0.5 s @ 100 Hz) */
         collect_window(window_float);
 
-        /* 2. Normalize to [-1, +1] */
-        for (int i = 0; i < NUM_FEATURES; i++) {
-            window_float[i] /= INPUT_SCALE_FACTOR;
+        /* 2. Per-axis z-score normalize */
+        const float means[3] = AXIS_MEANS;
+        const float stds[3]  = AXIS_STDS;
+        for (int s = 0; s < WINDOW_SIZE; s++) {
+            for (int a = 0; a < NUM_AXES; a++) {
+                window_float[s * NUM_AXES + a] =
+                    (window_float[s * NUM_AXES + a] - means[a]) / stds[a];
+            }
         }
 
         /* 3. Quantize float -> int8 */

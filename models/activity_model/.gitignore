@@ -11,3 +11,6 @@ intermediate/
 __pycache__/
 *.pyc
 .venv/
+
+# Cache
+cache/
