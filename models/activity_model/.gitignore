@@ -1,0 +1,13 @@
+# Downloaded PAMAP2 dataset (~656 MB)
+data/
+
+# Training output
+output/
+
+# Intermediate compiler artifacts
+intermediate/
+
+# Python
+__pycache__/
+*.pyc
+.venv/

@@ -1,0 +1,46 @@
+# Copyright (c) 2026 Nordic Semiconductor
+#
+# SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+
+default_values:
+  get_quantized_data: &get_quantized_data False
+  interlayer_buffer_size: &interlayer_buffer_size 125000
+  psum_buffer_size: &psum_buffer_size 0
+  constants_location: &constants_location NVM
+  no_striping: &no_striping False
+  test_vectors_list: &test_vector_list [0-3]
+  op_radix: &op_radix 0
+  cpu_op_codes_list: &cpu_op_codes_list { 25: 100 }
+  log_level: &log_level info
+  run_all_variants: &run_all_variants False
+  conv2d_setting: &conv2d_setting local_psum
+  psum_buffer_placement: &psum_buffer_placement interlayer_buffer
+  normalize_scaleshift: &normalize_scaleshift True
+  disable_op_quantization: &disable_op_quantization True
+  skip_softmax_op: &skip_softmax_op False
+
+activity_model:
+  run_all_variants: *run_all_variants
+  conv2d_setting: *conv2d_setting
+  skip_softmax_op: *skip_softmax_op
+  normalize_scaleshift: *normalize_scaleshift
+  disable_op_quantization: *disable_op_quantization
+  tflite_model: output/activity_model.tflite
+  model_name: ACTIVITY_MODEL
+  float_model:
+  train_data:
+  test_data:
+  test_labels:
+  test_labels_format: "just_labels"
+  test_vectors: *test_vector_list
+  header_file_test_vector_cnt: 3
+  get_quantized_data: False
+  interlayer_buffer_size: 125000
+  psum_buffer_size: 0
+  constants_location: NVM
+  no_striping: False
+  classification_labels: ["sitting", "standing", "lying_down", "walking", "running", "cycling", "workout"]
+  op_radix: 0
+  cpu_op_codes_list: { 25: 100 }
+  log_level: *log_level
+  psum_buffer_placement: *psum_buffer_placement

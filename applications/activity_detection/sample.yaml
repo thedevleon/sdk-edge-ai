@@ -1,0 +1,17 @@
+sample:
+  description: Activity detection using LIS2DUX12 accelerometer and Axon NPU
+  name: nRF Edge AI Activity Detection
+tests:
+  sample.activity_detection:
+    harness: console
+    harness_config:
+      type: multi_line
+      ordered: true
+      regex:
+        - "Activity Detection: initialized"
+        - "Activity Detection: running"
+    sysbuild: true
+    platform_allow:
+      - nrf54lm20dk/nrf54lm20b/cpuapp
+    integration_platforms:
+      - nrf54lm20dk/nrf54lm20b/cpuapp

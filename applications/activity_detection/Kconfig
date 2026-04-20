@@ -1,0 +1,25 @@
+#
+# Copyright (c) 2026 Nordic Semiconductor
+#
+# SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+#
+
+source "Kconfig.zephyr"
+
+menu "Activity Detection"
+
+config ACTIVITY_INFERENCE_INTERVAL_MS
+	int "Interval between inference runs in milliseconds"
+	default 500
+	help
+	  How often to collect a window of accelerometer samples and run
+	  inference.  At 100 Hz ODR with a 50-sample window the minimum
+	  is 500 ms.
+
+config ACTIVITY_PRINT_RAW_ACCEL
+	bool "Print raw accelerometer values"
+	default n
+	help
+	  Print each accelerometer sample to the console for debugging.
+
+endmenu

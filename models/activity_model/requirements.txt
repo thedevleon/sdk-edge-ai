@@ -1,0 +1,12 @@
+#
+# Copyright (c) 2026 Nordic Semiconductor ASA
+#
+# SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+#
+
+# tensorflow is pre-installed in the ROCm docker image
+numpy
+scikit-learn
+matplotlib
+pyyaml
+cffi
