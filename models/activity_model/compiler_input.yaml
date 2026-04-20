@@ -11,7 +11,7 @@ default_values:
   test_vectors_list: &test_vector_list [0-3]
   op_radix: &op_radix 0
   cpu_op_codes_list: &cpu_op_codes_list { 25: 100 }
-  log_level: &log_level info
+  log_level: &log_level debug
   run_all_variants: &run_all_variants False
   conv2d_setting: &conv2d_setting local_psum
   psum_buffer_placement: &psum_buffer_placement interlayer_buffer

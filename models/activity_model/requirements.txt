@@ -5,7 +5,8 @@
 #
 
 tensorflow
-numpy
+# fixes issue with CRITICAL: Exception: only 0-dimensional arrays can be converted to Python scalars
+numpy==2.3.5
 scikit-learn
 matplotlib
 pyyaml
