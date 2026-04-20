@@ -8,19 +8,21 @@
 Activity Detection TFLite Model for Axon NPU
 =============================================
 
-Trains a 7-class human activity recognition model using the PAMAP2 dataset
-(100 Hz triaxial accelerometer from the hand/wrist IMU, ±16g scale).
+Trains a 10-class human activity recognition model using the Capture24 dataset
+(100 Hz triaxial accelerometer from wrist-worn Axivity AX3, ±8g scale).
 
-Target classes mapped from PAMAP2 activity IDs:
-  1=lying -> lying_down, 2=sitting, 3=standing, 4=walking,
-  5=running, 6=cycling, 24=rope_jumping -> workout
+Uses WillettsSpecific2018 labels directly:
+  bicycling, household-chores, manual-work, mixed-activity,
+  sitting, sleep, sports, standing, vehicle, walking
 
 Output: int8-quantized TFLite model suitable for the Axon NPU compiler.
 """
 
 import os
+import time
 import glob
 import numpy as np
+import pandas as pd
 import tensorflow as tf
 from pathlib import Path
 
@@ -32,103 +34,128 @@ np.random.seed(SEED)
 WINDOW_SIZE = 50          # samples per inference window (0.5 s @ 100 Hz)
 NUM_AXES = 3              # accel x, y, z
 NUM_FEATURES = WINDOW_SIZE * NUM_AXES
-NUM_CLASSES = 7
-SAMPLE_RATE_HZ = 100      # PAMAP2 IMU sample rate
+NUM_CLASSES = 10
+SAMPLE_RATE_HZ = 100      # Capture24 IMU sample rate
 
 CLASS_NAMES = [
-    "sitting",       # 0  <- PAMAP2 activity 2
-    "standing",      # 1  <- PAMAP2 activity 3
-    "lying_down",    # 2  <- PAMAP2 activity 1
-    "walking",       # 3  <- PAMAP2 activity 4
-    "running",       # 4  <- PAMAP2 activity 5
-    "cycling",       # 5  <- PAMAP2 activity 6
-    "workout",       # 6  <- PAMAP2 activity 24 (rope jumping)
+    "bicycling",         # 0
+    "household-chores",  # 1
+    "manual-work",       # 2
+    "mixed-activity",    # 3
+    "sitting",           # 4
+    "sleep",             # 5
+    "sports",            # 6
+    "standing",          # 7
+    "vehicle",           # 8
+    "walking",           # 9
 ]
 
-# PAMAP2 activity ID -> our class index
-ACTIVITY_MAP = {
-    2:  0,   # sitting
-    3:  1,   # standing
-    1:  2,   # lying_down
-    4:  3,   # walking
-    5:  4,   # running
-    6:  5,   # cycling
-    24: 6,   # workout (rope jumping)
-}
+# ── Capture24 annotation configuration ───────────────────────────────
+# Which annotation scheme to use from annotation-label-dictionary.csv.
+# Available: label:WillettsSpecific2018, label:WillettsMET2018,
+#   label:DohertySpecific2018, label:Willetts2018,
+#   label:Doherty2018, label:Walmsley2020
+ANNOTATION_SCHEME = "label:WillettsSpecific2018"
 
-# PAMAP2 column indices (0-based)
-COL_ACT_ID = 1
-COL_HAND_ACCEL = (4, 5, 6)  # hand IMU ±16g accel x, y, z
-
-DATASET_URL = "https://archive.ics.uci.edu/static/public/231/pamap2+physical+activity+monitoring.zip"
-
+DATA_DIR = Path("data/capture24")
 OUTPUT_DIR = Path("output/")
+
+# Set to an int to limit the number of subjects loaded (None = all).
+MAX_SUBJECTS = 20
 
 # ── Data loading and windowing ───────────────────────────────────────
 
-def load_subject(filepath: Path) -> np.ndarray:
-    """Load one subject .dat file. Returns (N, 54) float32 array with NaNs."""
-    data = np.loadtxt(filepath, dtype=np.float32, comments=None)
-    # Replace NaN with 0 for robustness
-    data = np.nan_to_num(data, nan=0.0)
-    return data
+def load_annotation_label_map(dict_path: Path, scheme: str) -> dict:
+    """Load annotation-label-dictionary.csv.
+
+    Returns a dict mapping raw annotation text -> class index,
+    using scheme labels directly (auto-indexed from CLASS_NAMES).
+    """
+    df = pd.read_csv(dict_path)
+    label_to_idx = {name: i for i, name in enumerate(CLASS_NAMES)}
+    df["class_idx"] = df[scheme].map(label_to_idx)
+    df = df.dropna(subset=["class_idx"])
+    return dict(zip(df["annotation"], df["class_idx"].astype(int)))
 
 
-def extract_windows(data: np.ndarray, window_size: int, stride: int):
+def extract_windows(accel: np.ndarray, class_ids: np.ndarray,
+                    window_size: int, stride: int):
     """Extract overlapping windows from one subject's data.
 
+    Windows never cross activity segment boundaries.
+
     Returns (windows, labels) where each window is flattened
-    (window_size * NUM_AXES,) float32 accel-only.
+    (window_size * NUM_AXES,) float32.
     """
+    changes = np.where(class_ids[:-1] != class_ids[1:])[0] + 1
+    segments = np.split(np.arange(len(class_ids)), changes)
+
     windows = []
     labels = []
 
-    act_ids = data[:, COL_ACT_ID].astype(int)
-    accel = data[:, list(COL_HAND_ACCEL)]  # (N, 3)
-
-    # Walk through by activity segment to avoid crossing boundaries
-    i = 0
-    while i < len(act_ids):
-        act = act_ids[i]
-        if act not in ACTIVITY_MAP:
-            i += 1
+    for seg_indices in segments:
+        if len(seg_indices) < window_size:
             continue
+        label = class_ids[seg_indices[0]]
+        seg_accel = accel[seg_indices]
 
-        # Find end of this contiguous activity segment
-        j = i
-        while j < len(act_ids) and act_ids[j] == act:
-            j += 1
-
-        # Extract windows from this segment
-        seg = accel[i:j]
         start = 0
-        while start + window_size <= len(seg):
-            win = seg[start:start + window_size].flatten()
+        while start + window_size <= len(seg_accel):
+            win = seg_accel[start:start + window_size].flatten()
             windows.append(win)
-            labels.append(ACTIVITY_MAP[act])
+            labels.append(label)
             start += stride
 
-        i = j
+    if not windows:
+        return (np.empty((0, window_size * NUM_AXES), dtype=np.float32),
+                np.empty(0, dtype=np.int64))
 
     return np.array(windows, dtype=np.float32), np.array(labels, dtype=np.int64)
 
 
 def load_all_data(window_size: int = WINDOW_SIZE, stride: int = 25):
-    """Load all subjects from Protocol and Optional, extract windows."""
+    """Load all subjects from Capture24, extract windows."""
+    dict_path = DATA_DIR / "annotation-label-dictionary.csv"
+    ann_to_class = load_annotation_label_map(dict_path, ANNOTATION_SCHEME)
+
     x_list, y_list = [], []
 
-    for file in glob.glob("data/PAMAP2_Dataset/Protocol/subject*.dat"):
-        print(f"\n  Loading from {file}")
-        data = load_subject(file)
-        w, l = extract_windows(data, window_size, stride)
-        x_list.append(w)
-        y_list.append(l)
-        print(f"  {len(l)} windows")
+    subject_files = sorted(glob.glob(str(DATA_DIR / "P*.csv.gz")))
+
+    if not subject_files:
+        raise FileNotFoundError(
+            f"No P*.csv.gz files found in {DATA_DIR}"
+        )
+
+    if MAX_SUBJECTS is not None:
+        subject_files = subject_files[:MAX_SUBJECTS]
+
+    for file in subject_files:
+        name = Path(file).name
+        print(f"\n  Loading {name} ...", end="")
+        df = pd.read_csv(file)[["x", "y", "z", "annotation"]]
+
+        class_ids = df["annotation"].map(ann_to_class)
+        valid = class_ids.notna()
+
+        if valid.sum() == 0:
+            print(" no valid annotations, skipping")
+            continue
+
+        accel = df.loc[valid, ["x", "y", "z"]].values.astype(np.float32)
+        ids = class_ids[valid].values.astype(np.int64)
+
+        w, l = extract_windows(accel, ids, window_size, stride)
+
+        if len(l) > 0:
+            x_list.append(w)
+            y_list.append(l)
+            print(f"  {len(l)} windows")
+        else:
+            print(" no windows extracted")
 
     if not x_list:
-        raise FileNotFoundError(
-            f"No subject*.dat files found."
-        )
+        raise RuntimeError("No windows extracted from any subject.")
 
     return np.concatenate(x_list), np.concatenate(y_list)
 
@@ -146,8 +173,9 @@ def make_representative_dataset(calibration_data: np.ndarray):
 def build_model() -> tf.keras.Model:
     """Dense-only model compatible with Axon NPU (FullyConnected + ReLU)."""
     model = tf.keras.Sequential([
-        tf.keras.layers.Dense(64, input_dim=NUM_FEATURES, activation='relu', name='dense_0'),
-        tf.keras.layers.Dense(32, activation='relu', name='dense_1'),
+        tf.keras.layers.Input(shape=(NUM_FEATURES,)),
+        tf.keras.layers.Dense(128, activation='relu', name='dense_0'),
+        tf.keras.layers.Dense(64, activation='relu', name='dense_1'),
         tf.keras.layers.Dense(NUM_CLASSES, activation='linear', name='output'),
     ], name="activity_detection")
     return model
@@ -166,7 +194,7 @@ def main():
         print("No GPU detected, using CPU")
 
     # ── Load and window data ─────────────────────────────────────────
-    print("\nLoading PAMAP2 dataset ...")
+    print("\nLoading Capture24 dataset ...")
     x_all, y_all = load_all_data(window_size=WINDOW_SIZE, stride=25)
     print(f"  total windows: {len(y_all)}")
 
@@ -193,17 +221,19 @@ def main():
 
     # ── Train float model ────────────────────────────────────────────
     model = build_model()
-    lr = tf.keras.optimizers.schedules.CosineDecay(0.001, decay_steps=15000)
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
         loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
         metrics=["accuracy"],
     )
     model.summary()
 
     print("\nTraining ...")
+    total_start = time.time()
     model.fit(x_train, y_train, epochs=50, batch_size=64,
-              validation_split=0.1, verbose=2)
+              validation_split=0.1, verbose=1)
+    total_duration = time.time() - total_start
+    print(f"\nTotal training time: {total_duration:.1f}s ({total_duration/60:.1f}min)")
 
     loss, acc = model.evaluate(x_test, y_test, verbose=0)
     print(f"\nFloat model - test accuracy: {acc:.4f}  loss: {loss:.4f}")
@@ -289,14 +319,15 @@ def main():
     meta_path = OUTPUT_DIR / "activity_model_meta.txt"
     with open(meta_path, "w") as f:
         f.write(f"model_name: ACTIVITY_MODEL\n")
-        f.write(f"dataset: PAMAP2\n")
+        f.write(f"dataset: Capture24\n")
+        f.write(f"annotation_scheme: {ANNOTATION_SCHEME}\n")
         f.write(f"window_size: {WINDOW_SIZE}\n")
         f.write(f"num_axes: {NUM_AXES}\n")
         f.write(f"num_classes: {NUM_CLASSES}\n")
         f.write(f"classes: {','.join(CLASS_NAMES)}\n")
         f.write(f"sample_rate_hz: {SAMPLE_RATE_HZ}\n")
-        f.write(f"imu_position: hand_wrist\n")
-        f.write(f"accel_scale: plusminus_16g\n")
+        f.write(f"imu_position: wrist\n")
+        f.write(f"accel_scale: plusminus_8g\n")
         f.write(f"input_scale_factor: {input_scale}\n")
         f.write(f"input_quant_scale: {q_scale_in}\n")
         f.write(f"input_quant_zp: {q_zp_in}\n")
