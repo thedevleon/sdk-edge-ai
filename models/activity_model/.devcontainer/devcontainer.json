@@ -1,0 +1,21 @@
+{
+  "name": "Edge AI Activity Model",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "training",
+  "workspaceFolder": "/workspace",
+  "forwardPorts": [],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.debugpy",
+        "ms-toolsai.jupyter"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/bin/python3",
+        "python.terminal.activateEnvironment": false
+      }
+    }
+  },
+  "remoteUser": "root"
+}
