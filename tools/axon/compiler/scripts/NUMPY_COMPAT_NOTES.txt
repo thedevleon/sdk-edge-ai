@@ -1,0 +1,36 @@
+# Numpy >=2.0 Compatibility Fixes
+#
+# SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+#
+# NOTE: These changes are needed for numpy >= 2.0 where int() no longer
+# accepts non-0-dimensional numpy arrays. Add .item() before int() conversion.
+#
+# When ready to implement, apply the following diffs:
+
+# 1. compile_model_helper.py, line ~165-166
+#    OLD:
+#      model_op_multiplier = int(
+#          np.round((model_op_scale)*(2**model_op_scaleshift)))
+#    NEW:
+#      model_op_multiplier = int(
+#          np.round((model_op_scale)*(2**model_op_scaleshift)).item())
+
+# 2. compile_model_helper.py, line ~176
+#    OLD:
+#      model_ip_multiplier = int(np.round((1/scale)*(2**model_ip_scaleshift)))
+#    NEW:
+#      model_ip_multiplier = int(np.round((1/scale)*(2**model_ip_scaleshift)).item())
+
+# 3. compile_model_helper.py, line ~644-645
+#    OLD:
+#      layer_op_multiplier = int(
+#          np.round((layer_op_scale)*(2**layer_op_scaleshift)))
+#    NEW:
+#      layer_op_multiplier = int(
+#          np.round((layer_op_scale)*(2**layer_op_scaleshift)).item())
+
+# 4. utility/util.py, line ~150 (optimized_ip_scaling_shift)
+#    OLD:
+#      sc = int(np.round(data_*(2**scaleshift)))
+#    NEW:
+#      sc = int(np.round(data_*(2**scaleshift)).item())

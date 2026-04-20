@@ -29,8 +29,8 @@ activity_model:
   model_name: ACTIVITY_MODEL
   float_model:
   train_data:
-  test_data:
-  test_labels:
+  test_data: output/test_data.npy
+  test_labels: output/test_labels.npy
   test_labels_format: "just_labels"
   test_vectors: *test_vector_list
   header_file_test_vector_cnt: 3

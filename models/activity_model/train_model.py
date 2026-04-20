@@ -271,6 +271,14 @@ def main():
             ca = per_class_correct[cls_id] / per_class_total[cls_id]
             print(f"    {CLASS_NAMES[cls_id]:15s}: {ca:.4f}  ({per_class_correct[cls_id]}/{per_class_total[cls_id]})")
 
+    # ── Save test data for Axon compiler ──────────────────────────────
+    test_data_path = OUTPUT_DIR / "test_data.npy"
+    test_labels_path = OUTPUT_DIR / "test_labels.npy"
+    np.save(test_data_path, x_test)
+    np.save(test_labels_path, y_test)
+    print(f"  saved test data  -> {test_data_path}  shape={x_test.shape}")
+    print(f"  saved test labels -> {test_labels_path}  shape={y_test.shape}")
+
     # ── Save metadata for Axon compiler ──────────────────────────────
     meta_path = OUTPUT_DIR / "activity_model_meta.txt"
     with open(meta_path, "w") as f:
