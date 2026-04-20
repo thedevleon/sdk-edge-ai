@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
 #
 
-# tensorflow is pre-installed in the ROCm docker image
+tensorflow
 numpy
 scikit-learn
 matplotlib

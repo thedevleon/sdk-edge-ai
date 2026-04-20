@@ -125,15 +125,6 @@ def load_all_data(window_size: int = WINDOW_SIZE, stride: int = 25):
         y_list.append(l)
         print(f"  {len(l)} windows")
 
-        # print(f"\n  Loading from {data_dir.name}/")
-        # for fp in dat_files:
-        #     print(f"    {fp.name} ...", end="")
-        #     data = load_subject(fp)
-        #     w, l = extract_windows(data, window_size, stride)
-        #     x_list.append(w)
-        #     y_list.append(l)
-        #     print(f"  {len(l)} windows")
-
     if not x_list:
         raise FileNotFoundError(
             f"No subject*.dat files found."
@@ -142,14 +133,13 @@ def load_all_data(window_size: int = WINDOW_SIZE, stride: int = 25):
     return np.concatenate(x_list), np.concatenate(y_list)
 
 
-def make_representative_dataset(x: np.ndarray):
-    """Return a callable yielding the first 100 real samples"""
-    calibration_data = x[:100].astype(np.int8)
-
-    def representative_dataset():
+def make_representative_dataset(calibration_data: np.ndarray):
+    """Return a callable yielding samples for TFLite int8 calibration."""
+    def rep_dataset():
         for i in range(len(calibration_data)):
             yield [calibration_data[i:i + 1]]
-        return representative_dataset
+    return rep_dataset
+
 
 # ── Keras model ──────────────────────────────────────────────────────
 
@@ -212,17 +202,21 @@ def main():
     loss, acc = model.evaluate(x_test, y_test, verbose=0)
     print(f"\nFloat model - test accuracy: {acc:.4f}  loss: {loss:.4f}")
 
+    # --- Save model ---
+    model.save(OUTPUT_DIR / "activity_model.keras")
+    model.export(OUTPUT_DIR / "saved_model", format='tf_saved_model')
+
     # ── Convert to int8-quantized TFLite ─────────────────────────────
     print("\nConverting to int8-quantized TFLite ...")
 
     converter = tf.lite.TFLiteConverter.from_keras_model(model)
-    # converter.optimizations = [tf.lite.Optimize.DEFAULT]
-    # converter.representative_dataset = make_representative_dataset(x_train)
-    # converter.target_spec.supported_ops = [
-    #     tf.lite.OpsSet.TFLITE_BUILTINS_INT8,
-    # ]
-    # converter.inference_input_type = tf.int8
-    # converter.inference_output_type = tf.int8
+    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+    converter.representative_dataset = make_representative_dataset(x_test[:100])
+    converter.target_spec.supported_ops = [
+        tf.lite.OpsSet.TFLITE_BUILTINS_INT8,
+    ]
+    converter.inference_input_type = tf.int8
+    converter.inference_output_type = tf.int8
 
     tflite_model = converter.convert()
 
