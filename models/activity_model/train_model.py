@@ -26,6 +26,8 @@ import pandas as pd
 import tensorflow as tf
 from pathlib import Path
 
+from model import build_model, SELECTED_MODEL, MODEL_REGISTRY
+
 SEED = 42
 tf.random.set_seed(SEED)
 np.random.seed(SEED)
@@ -36,6 +38,9 @@ NUM_AXES = 3              # accel x, y, z
 NUM_FEATURES = WINDOW_SIZE * NUM_AXES
 NUM_CLASSES = 10
 SAMPLE_RATE_HZ = 100      # Capture24 IMU sample rate
+
+EPOCHS = 20
+BATCH_SIZE = 128
 
 CLASS_NAMES = [
     "bicycling",         # 0
@@ -58,7 +63,7 @@ CLASS_NAMES = [
 ANNOTATION_SCHEME = "label:WillettsSpecific2018"
 
 DATA_DIR = Path("data/capture24")
-OUTPUT_DIR = Path("output/")
+OUTPUT_DIR = Path("models")
 
 # Set to an int to limit the number of subjects loaded (None = all).
 MAX_SUBJECTS = 20
@@ -84,8 +89,8 @@ def extract_windows(accel: np.ndarray, class_ids: np.ndarray,
 
     Windows never cross activity segment boundaries.
 
-    Returns (windows, labels) where each window is flattened
-    (window_size * NUM_AXES,) float32.
+    Returns (windows, labels) where each window has shape
+    (window_size, NUM_AXES) float32.
     """
     changes = np.where(class_ids[:-1] != class_ids[1:])[0] + 1
     segments = np.split(np.arange(len(class_ids)), changes)
@@ -101,13 +106,13 @@ def extract_windows(accel: np.ndarray, class_ids: np.ndarray,
 
         start = 0
         while start + window_size <= len(seg_accel):
-            win = seg_accel[start:start + window_size].flatten()
+            win = seg_accel[start:start + window_size]
             windows.append(win)
             labels.append(label)
             start += stride
 
     if not windows:
-        return (np.empty((0, window_size * NUM_AXES), dtype=np.float32),
+        return (np.empty((0, window_size, NUM_AXES), dtype=np.float32),
                 np.empty(0, dtype=np.int64))
 
     return np.array(windows, dtype=np.float32), np.array(labels, dtype=np.int64)
@@ -168,18 +173,6 @@ def make_representative_dataset(calibration_data: np.ndarray):
     return rep_dataset
 
 
-# ── Keras model ──────────────────────────────────────────────────────
-
-def build_model() -> tf.keras.Model:
-    """Dense-only model compatible with Axon NPU (FullyConnected + ReLU)."""
-    model = tf.keras.Sequential([
-        tf.keras.layers.Input(shape=(NUM_FEATURES,)),
-        tf.keras.layers.Dense(128, activation='relu', name='dense_0'),
-        tf.keras.layers.Dense(64, activation='relu', name='dense_1'),
-        tf.keras.layers.Dense(NUM_CLASSES, activation='linear', name='output'),
-    ], name="activity_detection")
-    return model
-
 # ── Main ─────────────────────────────────────────────────────────────
 
 def main():
@@ -220,7 +213,12 @@ def main():
     print(f"\n  train: {x_train.shape}  test: {x_test.shape}")
 
     # ── Train float model ────────────────────────────────────────────
-    model = build_model()
+    print(f"\nSelected model: {SELECTED_MODEL}")
+    print(f"Available models: {list(MODEL_REGISTRY.keys())}")
+    model = build_model(SELECTED_MODEL,
+                        window_size=WINDOW_SIZE,
+                        num_axes=NUM_AXES,
+                        num_classes=NUM_CLASSES)
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
         loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
@@ -230,7 +228,7 @@ def main():
 
     print("\nTraining ...")
     total_start = time.time()
-    model.fit(x_train, y_train, epochs=50, batch_size=64,
+    model.fit(x_train, y_train, epochs=EPOCHS, batch_size=BATCH_SIZE,
               validation_split=0.1, verbose=1)
     total_duration = time.time() - total_start
     print(f"\nTotal training time: {total_duration:.1f}s ({total_duration/60:.1f}min)")
