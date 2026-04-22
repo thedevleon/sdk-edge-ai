@@ -12,3 +12,4 @@ matplotlib
 pyyaml
 cffi
 tflite
+imbalanced-learn
