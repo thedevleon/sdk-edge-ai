@@ -3,6 +3,7 @@ data/
 
 # Training output
 output/
+models/
 
 # Intermediate compiler artifacts
 intermediate/

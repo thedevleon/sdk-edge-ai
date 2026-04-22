@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from pathlib import Path
+from imblearn.under_sampling import RandomUnderSampler
 
 from model import build_model, SELECTED_MODEL, MODEL_REGISTRY
 
@@ -113,9 +114,9 @@ def extract_windows(accel: np.ndarray, class_ids: np.ndarray,
 
     if not windows:
         return (np.empty((0, window_size, NUM_AXES), dtype=np.float32),
-                np.empty(0, dtype=np.int64))
+                np.empty(0, dtype=np.int32))
 
-    return np.array(windows, dtype=np.float32), np.array(labels, dtype=np.int64)
+    return np.array(windows, dtype=np.float32), np.array(labels, dtype=np.int32)
 
 
 def load_all_data(window_size: int = WINDOW_SIZE, stride: int = 25):
@@ -148,7 +149,7 @@ def load_all_data(window_size: int = WINDOW_SIZE, stride: int = 25):
             continue
 
         accel = df.loc[valid, ["x", "y", "z"]].values.astype(np.float32)
-        ids = class_ids[valid].values.astype(np.int64)
+        ids = class_ids[valid].values.astype(np.int32)
 
         w, l = extract_windows(accel, ids, window_size, stride)
 
@@ -201,14 +202,29 @@ def main():
     np.random.shuffle(indices)
     x_all, y_all = x_all[indices], y_all[indices]
 
-    # Normalize to [-1, 1] for better int8 quantization
-    input_scale = np.max(np.abs(x_all))
-    x_all = x_all / input_scale
-    print(f"  input scale factor: {input_scale:.4f}")
-
     split = int(0.8 * len(y_all))
     x_train, y_train = x_all[:split], y_all[:split]
     x_test, y_test = x_all[split:], y_all[split:]
+
+    # # Class balancing via random undersampling (on flattened windows)
+    # print("\n  Balancing classes via undersampling ...")
+    # n_train = x_train.shape[0]
+    # x_flat = x_train.reshape(n_train, -1)
+    # rus = RandomUnderSampler(random_state=SEED)
+    # x_flat_res, y_train_res = rus.fit_resample(x_flat, y_train)
+    # x_train = x_flat_res.reshape(-1, WINDOW_SIZE, NUM_AXES).astype(np.float32)
+    # y_train = y_train_res.astype(np.int32)
+
+    # res_unique, res_counts = np.unique(y_train, return_counts=True)
+    # print("  balanced class distribution:")
+    # for cls_id, cnt in zip(res_unique, res_counts):
+    #     print(f"    {CLASS_NAMES[cls_id]:15s}: {cnt:6d}")
+
+    # Normalize to [-1, 1] for better int8 quantization (global, computed on train)
+    input_scale = np.max(np.abs(x_train))
+    x_train = x_train / input_scale
+    x_test = x_test / input_scale
+    print(f"  input scale factor: {input_scale:.4f}")
 
     print(f"\n  train: {x_train.shape}  test: {x_test.shape}")
 
@@ -228,8 +244,14 @@ def main():
 
     print("\nTraining ...")
     total_start = time.time()
+    callbacks = [
+        tf.keras.callbacks.EarlyStopping(
+            monitor='val_accuracy', patience=5, mode='max',
+            restore_best_weights=True, verbose=1,
+        ),
+    ]
     model.fit(x_train, y_train, epochs=EPOCHS, batch_size=BATCH_SIZE,
-              validation_split=0.1, verbose=1)
+              validation_split=0.1, verbose=1, callbacks=callbacks)
     total_duration = time.time() - total_start
     print(f"\nTotal training time: {total_duration:.1f}s ({total_duration/60:.1f}min)")
 
