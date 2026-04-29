@@ -39,7 +39,7 @@ activity_model:
   psum_buffer_size: 0
   constants_location: NVM
   no_striping: False
-  classification_labels: ["sitting", "standing", "lying_down", "walking", "running", "cycling", "workout"]
+  classification_labels: ["bicycling", "household-chores", "manual-work", "mixed-activity", "sitting", "sleep", "sports", "standing", "vehicle", "walking"]
   op_radix: 0
   cpu_op_codes_list: { 25: 100 }
   log_level: *log_level

@@ -12,3 +12,7 @@ matplotlib
 pyyaml
 cffi
 imbalanced-learn
+# Optional: tensorflow-model-optimization for QAT fine-tuning.
+# WARNING: tfmot pins numpy~=1.23 which conflicts with numpy==2.3.5 above.
+# Only install if you can tolerate a numpy downgrade.
+# tensorflow-model-optimization

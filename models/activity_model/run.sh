@@ -7,7 +7,7 @@
 
 # ── Train + Compile activity model ──────────────────────────────────
 # Usage:
-#   ./run.sh train          # download PAMAP2 + train model, produce TFLite
+#   ./run.sh train          # download Capture24 + train model, produce TFLite
 #   ./run.sh compile        # compile TFLite for Axon NPU
 #   ./run.sh all            # train + compile
 #
@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AXON_COMPILER_DIR="/workspace/tools/axon/compiler"
 
 train() {
-    echo "=== Training activity detection model (PAMAP2) ==="
+    echo "=== Training activity detection model (Capture24) ==="
     python3 "$SCRIPT_DIR/train_model.py"
 }
 

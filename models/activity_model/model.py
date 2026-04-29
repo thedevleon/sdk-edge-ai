@@ -21,7 +21,7 @@ Select a model by setting SELECTED_MODEL to one of the MODEL_REGISTRY keys.
 import tensorflow as tf
 from tensorflow.keras import layers, Model, regularizers
 
-SELECTED_MODEL = "cnn"
+SELECTED_MODEL = "resnet"
 
 MODEL_REGISTRY = {}
 

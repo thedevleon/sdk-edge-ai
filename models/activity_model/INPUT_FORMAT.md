@@ -9,17 +9,17 @@ SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
 
 The activity detection model takes **150 int8 values** representing a
 **50-sample window of triaxial accelerometer data** and classifies it
-into one of 7 activities.
+into one of 10 activities.
 
 | Property         | Value                                          |
 |------------------|------------------------------------------------|
 | Input shape      | `[1, 1, 150, 1]` (batch × H × W × channels)   |
 | Input type       | `int8_t` (quantized)                           |
 | Input size       | 150 bytes                                      |
-| Output shape     | `[1, 1, 7, 1]` — one score per class           |
+| Output shape     | `[1, 1, 10, 1]` — one logit per class          |
 | Output type      | `int8_t` (quantized logits, no softmax)         |
-| Classes          | sitting, standing, lying_down, walking, running, cycling, workout |
-| Inference time   | ~14138 Axon ticks                              |
+| Classes          | bicycling, household-chores, manual-work, mixed-activity, sitting, sleep, sports, standing, vehicle, walking |
+| Inference time   | ~14138 Axon ticks (varies by model architecture) |
 
 ## Sensor Requirements
 
@@ -122,7 +122,7 @@ static void quantize_window(const float *src, int8_t *dst, size_t len,
 
 static float  window_float[NUM_FEATURES];
 static int8_t input_q8[NUM_FEATURES];
-static int8_t output_q8[64];
+static int8_t output_q8[10];
 
 void activity_inference_loop(void)
 {
@@ -150,22 +150,22 @@ void activity_inference_loop(void)
         int16_t class_idx = nrf_axon_nn_get_classification(
             &model_ACTIVITY_MODEL, output_q8, NULL, &score);
 
-        /* class_idx: 0=sitting, 1=standing, 2=lying_down,
-                      3=walking,  4=running,  5=cycling,
-                      6=workout                          */
+        /* class_idx: 0=bicycling, 1=household-chores, 2=manual-work,
+                      3=mixed-activity, 4=sitting, 5=sleep,
+                      6=sports, 7=standing, 8=vehicle, 9=walking */
     }
 }
 ```
 
 ## Output Interpretation
 
-The model outputs 7 `int8_t` raw logits (no softmax). The predicted class
+The model outputs 10 `int8_t` raw logits (no softmax). The predicted class
 is the index of the maximum value:
 
 ```c
 int argmax = 0;
 int8_t max_val = output_q8[0];
-for (int i = 1; i < 7; i++) {
+for (int i = 1; i < 10; i++) {
     if (output_q8[i] > max_val) {
         max_val = output_q8[i];
         argmax = i;
@@ -183,15 +183,18 @@ int16_t class_idx = nrf_axon_nn_get_classification(
 
 ### Class Index Mapping
 
-| Index | Activity   |
-|-------|------------|
-| 0     | sitting    |
-| 1     | standing   |
-| 2     | lying_down |
-| 3     | walking    |
-| 4     | running    |
-| 5     | cycling    |
-| 6     | workout    |
+| Index | Activity         |
+|-------|------------------|
+| 0     | bicycling        |
+| 1     | household-chores |
+| 2     | manual-work      |
+| 3     | mixed-activity   |
+| 4     | sitting          |
+| 5     | sleep            |
+| 6     | sports           |
+| 7     | standing         |
+| 8     | vehicle          |
+| 9     | walking          |
 
 ### Dequantization (optional)
 
@@ -222,7 +225,7 @@ static void dequantize_output(const int8_t *src, float *dst, size_t len,
 | Buffer                  | Size (bytes) |
 |-------------------------|--------------|
 | Input buffer            | 150          |
-| Output buffer           | 7 (padded to 8 by Axon) |
+| Output buffer           | 10 (padded by Axon)     |
 | Interlayer buffer       | 408 (min)    |
 | PSUM buffer             | 0            |
 | Model constants (flash) | 12284        |

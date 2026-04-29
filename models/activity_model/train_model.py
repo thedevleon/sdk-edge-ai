@@ -25,7 +25,15 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from pathlib import Path
-from imblearn.under_sampling import RandomUnderSampler
+from sklearn.utils.class_weight import compute_class_weight
+from sklearn.model_selection import StratifiedShuffleSplit, train_test_split
+from sklearn.metrics import confusion_matrix, classification_report
+
+try:
+    import tensorflow_model_optimization as tfmot
+    TFMOT_AVAILABLE = True
+except ImportError:
+    TFMOT_AVAILABLE = False
 
 from model import build_model, SELECTED_MODEL, MODEL_REGISTRY
 
@@ -42,6 +50,9 @@ SAMPLE_RATE_HZ = 100      # Capture24 IMU sample rate
 
 EPOCHS = 20
 BATCH_SIZE = 128
+AUGMENT_FACTOR = 2        # number of augmented copies to generate
+USE_QAT = True            # enable Quantization-Aware Training fine-tuning
+QAT_EPOCHS = 5
 
 CLASS_NAMES = [
     "bicycling",         # 0
@@ -57,10 +68,6 @@ CLASS_NAMES = [
 ]
 
 # ── Capture24 annotation configuration ───────────────────────────────
-# Which annotation scheme to use from annotation-label-dictionary.csv.
-# Available: label:WillettsSpecific2018, label:WillettsMET2018,
-#   label:DohertySpecific2018, label:Willetts2018,
-#   label:Doherty2018, label:Walmsley2020
 ANNOTATION_SCHEME = "label:WillettsSpecific2018"
 
 DATA_DIR = Path("data/capture24")
@@ -70,6 +77,7 @@ OUTPUT_DIR = Path("models")
 MAX_SUBJECTS = 20
 
 # ── Data loading and windowing ───────────────────────────────────────
+
 
 def load_annotation_label_map(dict_path: Path, scheme: str) -> dict:
     """Load annotation-label-dictionary.csv.
@@ -119,12 +127,15 @@ def extract_windows(accel: np.ndarray, class_ids: np.ndarray,
     return np.array(windows, dtype=np.float32), np.array(labels, dtype=np.int32)
 
 
-def load_all_data(window_size: int = WINDOW_SIZE, stride: int = 25):
-    """Load all subjects from Capture24, extract windows."""
+def load_all_data(window_size: int = WINDOW_SIZE, stride: int = 25,
+                  test_subject_ratio: float = 0.2):
+    """Load all subjects from Capture24, extract windows, split by subject.
+
+    Subject-wise split prevents data leakage (windows from the same
+    subject never appear in both train and test).
+    """
     dict_path = DATA_DIR / "annotation-label-dictionary.csv"
     ann_to_class = load_annotation_label_map(dict_path, ANNOTATION_SCHEME)
-
-    x_list, y_list = [], []
 
     subject_files = sorted(glob.glob(str(DATA_DIR / "P*.csv.gz")))
 
@@ -136,34 +147,109 @@ def load_all_data(window_size: int = WINDOW_SIZE, stride: int = 25):
     if MAX_SUBJECTS is not None:
         subject_files = subject_files[:MAX_SUBJECTS]
 
-    for file in subject_files:
-        name = Path(file).name
-        print(f"\n  Loading {name} ...", end="")
-        df = pd.read_csv(file)[["x", "y", "z", "annotation"]]
+    # Subject-wise split to prevent data leakage
+    rng = np.random.RandomState(SEED)
+    rng.shuffle(subject_files)
+    n_test = max(1, int(len(subject_files) * test_subject_ratio))
+    test_files = subject_files[:n_test]
+    train_files = subject_files[n_test:]
 
-        class_ids = df["annotation"].map(ann_to_class)
-        valid = class_ids.notna()
+    def _load_files(files):
+        x_list, y_list = [], []
+        for file in files:
+            name = Path(file).name
+            print(f"\n  Loading {name} ...", end="")
+            df = pd.read_csv(file)[["x", "y", "z", "annotation"]]
 
-        if valid.sum() == 0:
-            print(" no valid annotations, skipping")
-            continue
+            class_ids = df["annotation"].map(ann_to_class)
+            valid = class_ids.notna()
 
-        accel = df.loc[valid, ["x", "y", "z"]].values.astype(np.float32)
-        ids = class_ids[valid].values.astype(np.int32)
+            if valid.sum() == 0:
+                print(" no valid annotations, skipping")
+                continue
 
-        w, l = extract_windows(accel, ids, window_size, stride)
+            accel = df.loc[valid, ["x", "y", "z"]].values.astype(np.float32)
+            ids = class_ids[valid].values.astype(np.int32)
 
-        if len(l) > 0:
-            x_list.append(w)
-            y_list.append(l)
-            print(f"  {len(l)} windows")
-        else:
-            print(" no windows extracted")
+            w, l = extract_windows(accel, ids, window_size, stride)
 
-    if not x_list:
-        raise RuntimeError("No windows extracted from any subject.")
+            if len(l) > 0:
+                x_list.append(w)
+                y_list.append(l)
+                print(f"  {len(l)} windows")
+            else:
+                print(" no windows extracted")
 
-    return np.concatenate(x_list), np.concatenate(y_list)
+        if not x_list:
+            return (np.empty((0, window_size, NUM_AXES), dtype=np.float32),
+                    np.empty(0, dtype=np.int32))
+
+        return np.concatenate(x_list), np.concatenate(y_list)
+
+    x_train, y_train = _load_files(train_files)
+    x_test, y_test = _load_files(test_files)
+    return x_train, y_train, x_test, y_test
+
+
+def augment_windows(windows: np.ndarray, labels: np.ndarray, factor: int = 1):
+    """Apply time-series augmentation to training windows.
+
+    Augmentations (from tiny benchmark audio/image pipelines, adapted
+    for 1-D triaxial accelerometer time-series):
+      - Gaussian noise
+      - Random magnitude scaling
+      - Random time shift (circular)
+    """
+    if factor <= 0:
+        return windows, labels
+
+    aug_windows = []
+    aug_labels = []
+    for _ in range(factor):
+        for w, l in zip(windows, labels):
+            aug = w.copy()
+            # Gaussian noise
+            aug += np.random.normal(0.0, 0.01, aug.shape).astype(np.float32)
+            # Random magnitude scaling
+            scale = np.random.uniform(0.9, 1.1)
+            aug *= scale
+            # Random time shift (circular)
+            shift = np.random.randint(-3, 4)
+            if shift != 0:
+                aug = np.roll(aug, shift, axis=0)
+            aug_windows.append(aug)
+            aug_labels.append(l)
+
+    aug_windows = np.array(aug_windows, dtype=np.float32)
+    aug_labels = np.array(aug_labels, dtype=np.int32)
+    return np.concatenate([windows, aug_windows]), np.concatenate([labels, aug_labels])
+
+
+def lr_schedule(epoch):
+    """Step-decay learning rate schedule (adapted from tiny KWS benchmark)."""
+    if epoch < 10:
+        return 0.001
+    elif epoch < 15:
+        return 0.0005
+    elif epoch < 18:
+        return 0.0001
+    else:
+        return 0.00005
+
+
+def make_stratified_calibration(x: np.ndarray, y: np.ndarray, n_samples: int = 200):
+    """Create a stratified calibration set for TFLite int8 quantization."""
+    if len(x) <= n_samples:
+        return x
+    try:
+        sss = StratifiedShuffleSplit(n_splits=1, test_size=n_samples, random_state=SEED)
+        _, cal_idx = next(sss.split(x, y))
+        return x[cal_idx]
+    except ValueError:
+        # fallback: random subset if stratification fails
+        rng = np.random.RandomState(SEED)
+        idx = rng.choice(len(x), size=n_samples, replace=False)
+        return x[idx]
 
 
 def make_representative_dataset(calibration_data: np.ndarray):
@@ -189,44 +275,60 @@ def main():
 
     # ── Load and window data ─────────────────────────────────────────
     print("\nLoading Capture24 dataset ...")
-    x_all, y_all = load_all_data(window_size=WINDOW_SIZE, stride=25)
-    print(f"  total windows: {len(y_all)}")
+    x_train, y_train, x_test, y_test = load_all_data(
+        window_size=WINDOW_SIZE, stride=25, test_subject_ratio=0.2
+    )
+    print(f"\n  total train windows: {len(y_train)}")
+    print(f"  total test windows:  {len(y_test)}")
 
-    unique, counts = np.unique(y_all, return_counts=True)
-    print("  class distribution:")
+    unique, counts = np.unique(y_train, return_counts=True)
+    print("  train class distribution:")
     for cls_id, cnt in zip(unique, counts):
         print(f"    {CLASS_NAMES[cls_id]:15s}: {cnt:6d}")
 
-    # ── Shuffle and split ────────────────────────────────────────────
-    indices = np.arange(len(y_all))
-    np.random.shuffle(indices)
-    x_all, y_all = x_all[indices], y_all[indices]
+    # ── Stratified train/validation split ────────────────────────────
+    print("\nStratified train/validation split ...")
+    try:
+        x_train, x_val, y_train, y_val = train_test_split(
+            x_train, y_train, test_size=0.1, random_state=SEED, stratify=y_train
+        )
+    except ValueError:
+        print("  stratified split failed (too few samples per class), using random split")
+        x_train, x_val, y_train, y_val = train_test_split(
+            x_train, y_train, test_size=0.1, random_state=SEED
+        )
+    print(f"  train: {len(y_train)}  val: {len(y_val)}")
 
-    split = int(0.8 * len(y_all))
-    x_train, y_train = x_all[:split], y_all[:split]
-    x_test, y_test = x_all[split:], y_all[split:]
+    # ── Data augmentation (train only) ───────────────────────────────
+    if AUGMENT_FACTOR > 0:
+        print(f"\nAugmenting training data (factor={AUGMENT_FACTOR}) ...")
+        x_train, y_train = augment_windows(x_train, y_train, factor=AUGMENT_FACTOR)
+        print(f"  augmented train size: {len(y_train)}")
 
-    # # Class balancing via random undersampling (on flattened windows)
-    # print("\n  Balancing classes via undersampling ...")
-    # n_train = x_train.shape[0]
-    # x_flat = x_train.reshape(n_train, -1)
-    # rus = RandomUnderSampler(random_state=SEED)
-    # x_flat_res, y_train_res = rus.fit_resample(x_flat, y_train)
-    # x_train = x_flat_res.reshape(-1, WINDOW_SIZE, NUM_AXES).astype(np.float32)
-    # y_train = y_train_res.astype(np.int32)
-
-    # res_unique, res_counts = np.unique(y_train, return_counts=True)
-    # print("  balanced class distribution:")
-    # for cls_id, cnt in zip(res_unique, res_counts):
-    #     print(f"    {CLASS_NAMES[cls_id]:15s}: {cnt:6d}")
-
-    # Normalize to [-1, 1] for better int8 quantization (global, computed on train)
+    # ── Normalize to [-1, 1] (global, computed on train) ────────────
     input_scale = np.max(np.abs(x_train))
     x_train = x_train / input_scale
+    x_val = x_val / input_scale
     x_test = x_test / input_scale
-    print(f"  input scale factor: {input_scale:.4f}")
+    print(f"\n  input scale factor: {input_scale:.4f}")
 
-    print(f"\n  train: {x_train.shape}  test: {x_test.shape}")
+    print(f"\n  train: {x_train.shape}  val: {x_val.shape}  test: {x_test.shape}")
+
+    # ── Class weights for imbalance ───────────────────────────────────
+    class_weights = compute_class_weight(
+        'balanced', classes=np.unique(y_train), y=y_train
+    )
+    class_weight_dict = {i: w for i, w in enumerate(class_weights)}
+    print("\n  class weights (raw):")
+    for cls_id, w in class_weight_dict.items():
+        print(f"    {CLASS_NAMES[cls_id]:15s}: {w:.3f}")
+
+    # Clamp to prevent extreme minority-class domination
+    MAX_CLASS_WEIGHT = 10.0
+    class_weight_dict = {i: min(w, MAX_CLASS_WEIGHT) for i, w in class_weight_dict.items()}
+    print(f"  class weights (clamped at {MAX_CLASS_WEIGHT}):")
+    for cls_id, w in class_weight_dict.items():
+        print(f"    {CLASS_NAMES[cls_id]:15s}: {w:.3f}")
 
     # ── Train float model ────────────────────────────────────────────
     print(f"\nSelected model: {SELECTED_MODEL}")
@@ -242,32 +344,69 @@ def main():
     )
     model.summary()
 
-    print("\nTraining ...")
+    print("\nTraining float model ...")
     total_start = time.time()
     callbacks = [
         tf.keras.callbacks.EarlyStopping(
             monitor='val_accuracy', patience=5, mode='max',
             restore_best_weights=True, verbose=1,
         ),
+        tf.keras.callbacks.LearningRateScheduler(lr_schedule, verbose=1),
+        tf.keras.callbacks.ModelCheckpoint(
+            str(OUTPUT_DIR / "activity_model_best.keras"),
+            monitor='val_accuracy', mode='max',
+            save_best_only=True, verbose=1,
+        ),
     ]
     model.fit(x_train, y_train, epochs=EPOCHS, batch_size=BATCH_SIZE,
-              validation_split=0.1, verbose=1, callbacks=callbacks)
+              validation_data=(x_val, y_val), verbose=1, callbacks=callbacks,
+              class_weight=class_weight_dict)
     total_duration = time.time() - total_start
     print(f"\nTotal training time: {total_duration:.1f}s ({total_duration/60:.1f}min)")
 
     loss, acc = model.evaluate(x_test, y_test, verbose=0)
     print(f"\nFloat model - test accuracy: {acc:.4f}  loss: {loss:.4f}")
 
+    # ── Quantization-Aware Training fine-tuning ──────────────────────
+    if USE_QAT and TFMOT_AVAILABLE:
+        print("\n--- QAT fine-tuning ---")
+        qat_model = tfmot.quantization.keras.quantize_model(model)
+        qat_model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
+            loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+            metrics=["accuracy"],
+        )
+        qat_model.fit(x_train, y_train, epochs=QAT_EPOCHS, batch_size=BATCH_SIZE,
+                      validation_data=(x_val, y_val), verbose=1,
+                      class_weight=class_weight_dict)
+        model = qat_model
+        loss, acc = model.evaluate(x_test, y_test, verbose=0)
+        print(f"\nAfter QAT - test accuracy: {acc:.4f}  loss: {loss:.4f}")
+    elif USE_QAT and not TFMOT_AVAILABLE:
+        print("\nQAT requested but tensorflow-model-optimization not installed. Skipping.")
+
     # --- Save model ---
     model.save(OUTPUT_DIR / "activity_model.keras")
     model.export(OUTPUT_DIR / "saved_model", format='tf_saved_model')
 
+    # ── Detailed evaluation ──────────────────────────────────────────
+    print("\n=== Detailed Evaluation ===")
+    y_pred = np.argmax(model.predict(x_test, verbose=0), axis=1)
+    print("\nConfusion Matrix:")
+    print(confusion_matrix(y_test, y_pred))
+    print("\nClassification Report:")
+    print(classification_report(y_test, y_pred, target_names=CLASS_NAMES))
+
     # ── Convert to int8-quantized TFLite ─────────────────────────────
     print("\nConverting to int8-quantized TFLite ...")
 
+    # Stratified calibration set (from test set, as in tiny benchmark)
+    x_cal = make_stratified_calibration(x_test, y_test, n_samples=200)
+    print(f"  calibration set size: {len(x_cal)} (stratified)")
+
     converter = tf.lite.TFLiteConverter.from_keras_model(model)
     converter.optimizations = [tf.lite.Optimize.DEFAULT]
-    converter.representative_dataset = make_representative_dataset(x_test[:100])
+    converter.representative_dataset = make_representative_dataset(x_cal)
     converter.target_spec.supported_ops = [
         tf.lite.OpsSet.TFLITE_BUILTINS_INT8,
     ]
